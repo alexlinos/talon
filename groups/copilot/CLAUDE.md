@@ -39,6 +39,17 @@ External IPs, file hashes, domains, process paths, and rule metadata are **prese
 
 Token definitions live in `siem/anon_proxy/fields.yaml` and are updated via git pull.
 
+**`mcp__copilot__SearchEventsTool` is not covered by this proxy.** It queries CoPilot's
+own search API and returns raw event documents — hostnames, usernames, and internal IPs
+land in context untokenized. For any search or correlation during an investigation, use
+`mcp__opensearch_anon__search_documents` instead. `SearchEventsTool` is reserved for
+standalone threat hunts where the privacy trade-off has been accepted deliberately; it is
+not a drop-in substitute for the anonymized search.
+
+The other CoPilot hunt tools are unaffected: `ListIndicesTool` and `ListEventSourcesTool`
+return infrastructure metadata only, and `GetAlertTool` returns the same class of alert
+metadata the Step 1 MySQL query already pulls.
+
 ---
 
 ## Privacy-Aware Local Analysis
@@ -313,6 +324,10 @@ After enriching the IOC, look for additional context in the SIEM:
 
 Use `mcp__opensearch_anon__search_documents` for all correlation queries — results will be anonymized consistently with the tokens already assigned in Step 2. Refer to `siem/CLAUDE.md` for field names and DSL patterns.
 
+> Do **not** reach for `mcp__copilot__SearchEventsTool` here. It bypasses the anonymizing
+> proxy and would also break token consistency with Step 2, so the same host would appear
+> under two different names in one investigation.
+
 ### Step 6 — Write back to CoPilot and deliver the report
 
 Run the write-back and the analyst message in parallel once analysis is complete.
@@ -522,6 +537,12 @@ investigation if dispatch errors. Full instructions: `notifications.md`
   - `SubmitAiAnalystIocsTool` — persist extracted + enriched IOCs (bulk, uses `report_id`)
   - `ListAiAnalystIocsByCustomerTool` — query IOCs across a customer, filterable by `vt_verdict`
   - `GetAlertAiAnalysisTool` — fetch complete analysis bundle (job + report + IOCs) for an alert
+  - **Threat hunting (read-only):**
+    - `GetAlertTool` — full detail for one alert by ID. Same data class as the Step 1 MySQL pull, so the same handling applies. (For the AI analyst's own job/report/IOCs, use `GetAlertAiAnalysisTool`.)
+    - `ListEventSourcesTool` — event sources searchable for a customer. Supplies `source_name` to `SearchEventsTool`.
+    - `ListIndicesTool` — raw indexer inventory (health, doc counts). Infrastructure only, no event contents.
+    - `GetAgentTool` — CoPilot's record for one agent: last-seen + status. Use `mcp__wazuh__GetAgentsTool` to *find* stale agents across an estate (it filters by `disconnected`/`never_connected`); use this to confirm CoPilot's own view of a specific one.
+    - `SearchEventsTool` — free-text event search, scoped per customer + source. **Do not use this inside the per-alert investigation workflow** — see the privacy note below.
 - `mcp__wazuh__*` — Wazuh manager API (use for agent inventory, SCA posture checks, and rule lookups to enrich investigations):
   - `AuthenticateTool` — test connectivity and refresh JWT
   - `GetAgentsTool` — list agents with status filtering (active, disconnected, never_connected)
