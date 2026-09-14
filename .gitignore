@@ -56,3 +56,6 @@ cve-mcp/.venv/
 .nanoclaw/
 
 agents-sdk-docs
+
+# Staged by container/build.sh for the copilot-mcp fork install
+container/vendor/

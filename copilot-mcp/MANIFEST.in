@@ -1,0 +1,14 @@
+include README.md
+include LICENSE
+include requirements.txt
+include .env.example
+recursive-include copilot_mcp_server *.py
+include copilot_mcp_server/py.typed
+
+prune tests
+prune .github
+prune .venv
+global-exclude __pycache__
+global-exclude *.egg-info
+global-exclude *.pyc
+global-exclude .DS_Store

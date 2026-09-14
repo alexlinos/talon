@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "copilot-mcp-server"
+version = "0.1.0+talon.1"
+description = "MCP server for SOCFortress CoPilot API (Talon fork: adds threat-hunting tools)"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.8"
+authors = [
+    { name = "SOCFortress", email = "info@socfortress.co" },
+]
+keywords = ["mcp", "copilot", "socfortress", "soc", "ai", "agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+dependencies = [
+    "fastmcp>=0.4",
+    "httpx[http2]>=0.27",
+    "pydantic>=2.7",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0.0",
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "isort>=5.12",
+    "flake8>=6.0",
+    "mypy>=1.0",
+    "pre-commit>=3.0",
+]
+
+[project.scripts]
+copilot-mcp-server = "copilot_mcp_server.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/socfortress/copilot-mcp-server"
+Repository = "https://github.com/socfortress/copilot-mcp-server"
+Issues = "https://github.com/socfortress/copilot-mcp-server/issues"
+
+[tool.setuptools.packages.find]
+include = ["copilot_mcp_server*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+copilot_mcp_server = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ["py38"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.8"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "slow: marks tests as slow",
+    "integration: marks tests as integration tests",
+]
+
+[tool.coverage.run]
+omit = ["tests/*", ".venv/*", "**/__pycache__/*"]
