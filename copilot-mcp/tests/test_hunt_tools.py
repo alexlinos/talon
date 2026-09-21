@@ -22,7 +22,7 @@ from copilot_mcp_server import endpoints
 from copilot_mcp_server.client import CoPilotClient
 from copilot_mcp_server.config import Config, CoPilotConfig, ServerConfig
 from copilot_mcp_server.exceptions import CoPilotMCPError
-from copilot_mcp_server.hunt import timeframe_params
+from copilot_mcp_server.hunt import normalize_hit, timeframe_params
 from copilot_mcp_server.server import CoPilotMCPServer
 
 TOKEN_PATH = "/api/auth/token"
@@ -362,3 +362,40 @@ def test_timeframe_params_rejects_reversed_range():
 def test_timeframe_params_rejects_garbage():
     with pytest.raises(CoPilotMCPError, match="Unrecognized timeframe"):
         timeframe_params("whenever")
+
+
+# --------------------------------------------------------------------------- #
+# Field mapping — regression cover for names observed on the live instance
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "data_win_eventdata_user",
+        "data_win_eventdata_targetUserName",
+        "data_win_eventdata_subjectUserName",
+        "data_dstuser",
+        "data_srcuser",
+    ],
+)
+def test_normalize_hit_resolves_each_observed_user_field(field_name: str):
+    """Each of these carried the user on real events; none may silently drop out."""
+    shaped = normalize_hit({field_name: "svc_backup", "agent_name": "WIN-DC01"})
+    assert shaped["user"] == "svc_backup"
+
+
+def test_normalize_hit_prefers_sysmon_user_over_logon_target():
+    """Sysmon's `user` is the process owner and wins when both are present."""
+    shaped = normalize_hit(
+        {
+            "data_win_eventdata_user": "svc_backup",
+            "data_win_eventdata_targetUserName": "Administrator",
+        }
+    )
+    assert shaped["user"] == "svc_backup"
+
+
+def test_normalize_hit_leaves_user_none_when_event_has_no_user():
+    """Syslog and network events genuinely carry no user — None is correct."""
+    shaped = normalize_hit({"agent_name": "fw01", "rule_id": "5715", "syslog_type": "sshd"})
+    assert shaped["user"] is None
+    assert shaped["host"] == "fw01"

@@ -90,7 +90,20 @@ _FIELD_CANDIDATES: Dict[str, Tuple[str, ...]] = {
     "timestamp": ("timestamp", "@timestamp", "alert_timestamp", "event_timestamp"),
     "host": ("agent_name", "agent_labels_host", "host_name", "hostname", "manager_name"),
     "agent_id": ("agent_id", "agent_ip"),
-    "user": ("data_win_eventdata_user", "user", "data_srcuser", "data_dstuser"),
+    # Order matters: `_first_present` takes the first hit. Frequencies below are
+    # from a 700-event sample of this estate's Wazuh source (see scripts/smoke_test.py).
+    # Sysmon's `user` wins most often; `targetUserName` is the account that logged
+    # on in Windows 4624/4625, `subjectUserName` the account that requested it.
+    # Roughly a third of events (syslog, network) carry no user at all — None is
+    # the correct answer there, not a mapping gap.
+    "user": (
+        "data_win_eventdata_user",  # 296
+        "data_win_eventdata_targetUserName",  # 143
+        "data_win_eventdata_subjectUserName",  # 16
+        "data_dstuser",  # 4
+        "data_srcuser",  # 2
+        "user",  # generic fallback for other estates/sources
+    ),
     "rule_id": ("rule_id", "rule_sid", "sid"),
     "rule_description": ("rule_description", "rule_name", "description"),
 }
