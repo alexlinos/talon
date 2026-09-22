@@ -218,6 +218,15 @@ class SearchEventsArgs(BaseModel):
         le=1000,
         description="Maximum hits per source (1-1000). Defaults to 100.",
     )
+    include_raw: bool = Field(
+        default=False,
+        description=(
+            "Include the full untouched source document per hit as raw_fields. "
+            "Off by default: these events carry 40+ fields each, and a handful "
+            "of them exceeds the tool-result size cap. Turn it on only with a "
+            "small limit, when you need a field the shaped view omits."
+        ),
+    )
 
 
 class ListEventSourcesArgs(BaseModel):
@@ -236,6 +245,44 @@ class GetAgentArgs(BaseModel):
     agent_id: str = Field(
         ..., max_length=128, description="The agent ID, e.g. the Wazuh agent identifier"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Result size budget
+# --------------------------------------------------------------------------- #
+#: `_run_tool` truncates its serialized result at 32000 characters. That cut
+#: lands mid-string on a JSON payload and hands the agent something it cannot
+#: parse, so trim whole hits first and stay under the cap.
+RESULT_BUDGET = 28000
+
+
+def _fit_to_budget(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop trailing hits until the serialized result fits, and say so.
+
+    Returning fewer hits is recoverable — the agent can narrow the query or the
+    timeframe. Returning unparseable JSON is not.
+    """
+
+    def size(payload: Dict[str, Any]) -> int:
+        return len(json.dumps(payload, indent=2, default=str))
+
+    if size(result) <= RESULT_BUDGET:
+        return result
+
+    hits = list(result.get("hits") or [])
+    kept = len(hits)
+    while kept > 0:
+        kept = max(0, kept - max(1, kept // 5))
+        result["hits"] = hits[:kept]
+        result["hits_omitted"] = len(hits) - kept
+        result["note"] = (
+            f"Result too large: {len(hits) - kept} of {len(hits)} hits omitted to "
+            "stay within the tool-result size limit. Narrow the timeframe, lower "
+            "the limit, or set a more specific query."
+        )
+        if size(result) <= RESULT_BUDGET:
+            break
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -568,6 +615,7 @@ class CoPilotMCPServer:
 
         hits: List[Dict[str, Any]] = []
         errors: Dict[str, str] = {}
+        dropped_raw = False
         for source in sources:
             try:
                 payload = await self._get_client().search_events(
@@ -585,6 +633,9 @@ class CoPilotMCPServer:
             for hit in extract_hits(payload):
                 shaped = normalize_hit(hit, args.query)
                 shaped.setdefault("source_name", source)
+                if not args.include_raw:
+                    shaped.pop("raw_fields", None)
+                    dropped_raw = True
                 hits.append(shaped)
 
         result: Dict[str, Any] = {
@@ -597,7 +648,12 @@ class CoPilotMCPServer:
         }
         if errors:
             result["source_errors"] = errors
-        return result
+        if dropped_raw:
+            result["note"] = (
+                "raw_fields omitted; set include_raw=true (with a small limit) "
+                "to see the full source documents."
+            )
+        return _fit_to_budget(result)
 
     def _register_hunt_tools(self) -> None:
         if self._is_enabled("SearchEventsTool"):

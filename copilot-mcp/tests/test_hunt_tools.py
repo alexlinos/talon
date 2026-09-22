@@ -127,7 +127,9 @@ async def test_search_events_tool_shapes_hits_and_sends_relative_timerange():
     assert found["index"] == "wazuh-alerts-4.x-2026.09.12"
     assert found["source_name"] == "wazuh"
     assert "data_win_eventdata_commandLine" in found["matched_fields"]
-    assert found["raw_fields"]["rule_description"].startswith("Powershell")
+    # raw_fields is opt-in: these events carry 40+ fields and a few hits
+    # would blow the tool-result size cap.
+    assert "raw_fields" not in found
 
     # last_24h must go out as the API's relative timerange, not absolute bounds.
     params = _api_calls(seen)[0].url.params
@@ -399,3 +401,66 @@ def test_normalize_hit_leaves_user_none_when_event_has_no_user():
     shaped = normalize_hit({"agent_name": "fw01", "rule_id": "5715", "syslog_type": "sshd"})
     assert shaped["user"] is None
     assert shaped["host"] == "fw01"
+
+
+# --------------------------------------------------------------------------- #
+# Result size budget
+# --------------------------------------------------------------------------- #
+async def test_include_raw_returns_the_source_document():
+    def responder(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True, "events": [EVENT]})
+
+    server, _ = _build(responder)
+    result = await server.app.call_tool(
+        "SearchEventsTool",
+        {
+            "args": {
+                "customer_code": "ACME",
+                "query": "powershell",
+                "source_name": "wazuh",
+                "include_raw": True,
+                "limit": 1,
+            }
+        },
+    )
+    hit = _json_payload(result)["hits"][0]
+    assert hit["raw_fields"]["rule_description"].startswith("Powershell")
+
+
+async def test_oversized_result_stays_parseable_json():
+    """The size cap must cost hits, never JSON validity.
+
+    `_run_tool` truncates its serialized output at 32000 chars, and that cut
+    lands mid-string — the agent would receive something it cannot parse.
+    """
+    fat = {**EVENT, "full_log": "x" * 4000}
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True, "events": [fat] * 60})
+
+    server, _ = _build(responder)
+    result = await server.app.call_tool(
+        "SearchEventsTool",
+        {
+            "args": {
+                "customer_code": "ACME",
+                "query": "powershell",
+                "source_name": "wazuh",
+                "include_raw": True,
+                "limit": 60,
+            }
+        },
+    )
+    # _json_payload parses; reaching here at all proves the result is valid JSON.
+    payload = _json_payload(result)
+    assert payload["hits_omitted"] > 0
+    assert len(payload["hits"]) < 60
+    assert "omitted" in payload["note"]
+    assert len(json.dumps(payload, indent=2)) <= 32000
+
+
+def test_fit_to_budget_leaves_small_results_untouched():
+    from copilot_mcp_server.server import _fit_to_budget
+
+    small = {"hits": [{"host": "a"}], "hit_count": 1}
+    assert _fit_to_budget(small) == small
