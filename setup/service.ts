@@ -80,6 +80,8 @@ function setupLaunchd(
     'com.nanoclaw.plist',
   );
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+  // TMPDIR below points here; launchd will not create it.
+  fs.mkdirSync(path.join(projectRoot, 'tmp'), { recursive: true });
 
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -108,6 +110,17 @@ function setupLaunchd(
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
         <key>HOME</key>
         <string>${homeDir}</string>
+        <!-- Anything bind-mounted into an agent container must live on a path
+             the container runtime's VM can see. macOS os.tmpdir() is
+             /var/folders/..., which Docker Desktop shares but Colima, Rancher
+             and other Lima-backed runtimes do not — the mount then silently
+             resolves to nothing. The OneCLI SDK writes its gateway CA to
+             os.tmpdir() and mounts it, so with the default TMPDIR the
+             container gets no CA and every HTTPS call through the gateway
+             fails as a self-signed certificate. Keep temp files under the
+             home directory, which every runtime shares. -->
+        <key>TMPDIR</key>
+        <string>${projectRoot}/tmp</string>
     </dict>
     <key>StandardOutPath</key>
     <string>${projectRoot}/logs/nanoclaw.log</string>
@@ -250,6 +263,8 @@ RestartSec=5
 KillMode=process
 Environment=HOME=${homeDir}
 Environment=PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin
+# See the launchd plist above for why TMPDIR is pinned inside the project.
+Environment=TMPDIR=${projectRoot}/tmp
 StandardOutput=append:${projectRoot}/logs/nanoclaw.log
 StandardError=append:${projectRoot}/logs/nanoclaw.error.log
 

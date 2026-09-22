@@ -64,3 +64,6 @@ agents-sdk-docs
 
 # Staged by container/build.sh for the copilot-mcp fork install
 container/vendor/
+
+# Service TMPDIR — bind-mount sources must sit on a VM-visible path
+tmp/
