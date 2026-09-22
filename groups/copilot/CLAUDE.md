@@ -39,16 +39,18 @@ External IPs, file hashes, domains, process paths, and rule metadata are **prese
 
 Token definitions live in `siem/anon_proxy/fields.yaml` and are updated via git pull.
 
-**`mcp__copilot__SearchEventsTool` is not covered by this proxy.** It queries CoPilot's
-own search API and returns raw event documents — hostnames, usernames, and internal IPs
-land in context untokenized. For any search or correlation during an investigation, use
-`mcp__opensearch_anon__search_documents` instead. `SearchEventsTool` is reserved for
-standalone threat hunts where the privacy trade-off has been accepted deliberately; it is
-not a drop-in substitute for the anonymized search.
+**The CoPilot hunt tools are covered by the same proxy** — via `copilot_anon`, which
+wraps the CoPilot MCP exactly as `opensearch_anon` wraps OpenSearch:
 
-The other CoPilot hunt tools are unaffected: `ListIndicesTool` and `ListEventSourcesTool`
-return infrastructure metadata only, and `GetAlertTool` returns the same class of alert
-metadata the Step 1 MySQL query already pulls.
+**Use `mcp__copilot_anon__*` for event search, never `mcp__copilot__SearchEventsTool`.**
+
+Both proxies share one token map, so a host seen through OpenSearch and through CoPilot
+search gets the **same** token, and a single `deanonymize` call reverses both. That is
+what makes it safe to mix the two in one investigation.
+
+Keep using the raw `mcp__copilot__*` server for the AI-analyst write-back tools
+(`SubmitAiAnalystReportTool` and friends). They take de-anonymized text by design, and
+anonymizing their results would obscure the job and report IDs the workflow needs.
 
 ---
 
@@ -324,9 +326,12 @@ After enriching the IOC, look for additional context in the SIEM:
 
 Use `mcp__opensearch_anon__search_documents` for all correlation queries — results will be anonymized consistently with the tokens already assigned in Step 2. Refer to `siem/CLAUDE.md` for field names and DSL patterns.
 
-> Do **not** reach for `mcp__copilot__SearchEventsTool` here. It bypasses the anonymizing
-> proxy and would also break token consistency with Step 2, so the same host would appear
-> under two different names in one investigation.
+`mcp__copilot_anon__SearchEventsTool` is also available for correlation and is scoped
+per customer + event source. Tokens are shared with `opensearch_anon`, so hosts stay
+consistent with the tokens assigned in Step 2 either way. Prefer `opensearch_anon` when
+you need DSL control; reach for CoPilot search for broad free-text sweeps.
+
+> Never use the raw `mcp__copilot__SearchEventsTool` — it bypasses the proxy entirely.
 
 ### Step 6 — Write back to CoPilot and deliver the report
 
@@ -510,6 +515,7 @@ investigation if dispatch errors. Full instructions: `notifications.md`
 - `mcp__mysql__*` — CoPilot database (read-only): alerts, cases, agents, customers, integrations
 - `mcp__opensearch_anon__*` — **Preferred** anonymizing SIEM proxy: same tools as opensearch but PII is tokenized before reaching cloud context. Includes built-in `deanonymize` tool.
 - `mcp__opensearch__*` — Raw SIEM access (use only for non-sensitive queries like index listing, cluster health)
+- `mcp__copilot_anon__*` — **Preferred** anonymizing proxy over the CoPilot MCP: same tools as `copilot`, with PII tokenized. Shares its token map with `opensearch_anon`, so tokens are consistent across both. Use for `SearchEventsTool`.
 - `mcp__ollama__ollama_list_models` — list locally installed models (**call first** to check availability; skip all Ollama steps if this fails)
 - `mcp__ollama__ollama_generate` — run inference against a local model (model, prompt, system?)
 - `mcp__ollama__ollama_pull_model` / `ollama_delete_model` / `ollama_show_model` / `ollama_list_running` — model management
@@ -542,7 +548,7 @@ investigation if dispatch errors. Full instructions: `notifications.md`
     - `ListEventSourcesTool` — event sources searchable for a customer. Supplies `source_name` to `SearchEventsTool`.
     - `ListIndicesTool` — raw indexer inventory (health, doc counts). Infrastructure only, no event contents.
     - `GetAgentTool` — CoPilot's record for one agent: last-seen + status. Use `mcp__wazuh__GetAgentsTool` to *find* stale agents across an estate (it filters by `disconnected`/`never_connected`); use this to confirm CoPilot's own view of a specific one.
-    - `SearchEventsTool` — free-text event search, scoped per customer + source. **Do not use this inside the per-alert investigation workflow** — see the privacy note below.
+    - `SearchEventsTool` — free-text event search, scoped per customer + source. **Always call this via `mcp__copilot_anon__`, never the raw server** — see the privacy note above.
 - `mcp__wazuh__*` — Wazuh manager API (use for agent inventory, SCA posture checks, and rule lookups to enrich investigations):
   - `AuthenticateTool` — test connectivity and refresh JWT
   - `GetAgentsTool` — list agents with status filtering (active, disconnected, never_connected)

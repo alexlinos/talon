@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """
-Anonymizing MCP proxy for OpenSearch SIEM tools.
+Anonymizing MCP proxy for SIEM tools.
 
-Wraps opensearch-mcp-server and intercepts tool results, replacing sensitive
+Wraps a child MCP server and intercepts tool results, replacing sensitive
 field values with consistent session tokens before they reach the cloud model.
 
+The child is chosen by the ANON_PROXY_CHILD environment variable and defaults
+to opensearch-mcp.sh, so the original OpenSearch behaviour is unchanged. The
+CoPilot hunt tools are wrapped the same way via anon-copilot-mcp.sh.
+
 Token map is persisted at /workspace/group/session_tokens.json so tokens
-remain consistent across all tool calls within a session.
+remain consistent across all tool calls within a session — and, because every
+proxy instance shares that one file, across different wrapped servers too. A
+host seen through OpenSearch and through CoPilot search gets the same token.
+Concurrent instances coordinate with an exclusive file lock; see TokenMap.
 
 Built-in tool: `deanonymize` — call this with a text block containing tokens
 (USER_1, HOST_1, IP_INT_1, etc.) to get back the original values. Use it
@@ -25,6 +32,8 @@ import sys
 import ipaddress
 import threading
 import subprocess
+import fcntl
+import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -38,13 +47,37 @@ except ImportError:
 
 SCRIPT_DIR = Path(__file__).parent
 FIELDS_YAML = SCRIPT_DIR / "fields.yaml"
-OPENSEARCH_WRAPPER = SCRIPT_DIR.parent / "opensearch-mcp.sh"
-TOKEN_MAP_PATH = Path("/workspace/group/session_tokens.json")
+
+# The wrapped MCP server. Defaults to OpenSearch so existing deployments and
+# anon-opensearch-mcp.sh keep working untouched.
+CHILD_WRAPPER = Path(
+    os.environ.get("ANON_PROXY_CHILD", str(SCRIPT_DIR.parent / "opensearch-mcp.sh"))
+)
+
+# Shared by every proxy instance in the group, which is what keeps tokens
+# consistent across servers. Overridable so tests need no /workspace.
+TOKEN_MAP_PATH = Path(
+    os.environ.get("ANON_PROXY_TOKEN_MAP", "/workspace/group/session_tokens.json")
+)
+
+# Label used in diagnostics, e.g. "anon-proxy[copilot]".
+PROXY_LABEL = os.environ.get("ANON_PROXY_LABEL", CHILD_WRAPPER.stem)
 
 # ── Token map ─────────────────────────────────────────────────────────────────
 
 class TokenMap:
-    """Persistent, session-scoped map of original PII values to opaque tokens."""
+    """Persistent map of original PII values to opaque tokens.
+
+    Shared across proxy instances: the OpenSearch proxy and the CoPilot proxy
+    both point at the same file so a hostname seen through either server gets
+    the same token, and one `deanonymize` call reverses both.
+
+    That sharing means two OS processes mutate one file, so every assignment is
+    a read-modify-write under an exclusive `flock`. Without it, two proxies
+    allocating tokens at once would clobber each other's entries — losing the
+    mapping needed to de-anonymize the final report, and handing the same
+    number to two different values.
+    """
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -52,24 +85,68 @@ class TokenMap:
         self.counters: dict[str, int] = {}  # prefix -> last N assigned
         self._load()
 
-    def _load(self):
-        if TOKEN_MAP_PATH.exists():
-            try:
-                data = json.loads(TOKEN_MAP_PATH.read_text())
-                self.forward = data.get("forward", {})
-                self.counters = data.get("counters", {})
-            except Exception:
-                pass
+    # -- disk -------------------------------------------------------------- #
+    @contextlib.contextmanager
+    def _locked_file(self):
+        """Hold an exclusive cross-process lock for a read-modify-write.
 
-    def _save(self):
+        The lock is taken on a sidecar .lock file rather than the map itself:
+        the map is replaced via atomic rename, so a lock on its inode would be
+        dropped the moment we rewrite it.
+        """
+        lock_path = TOKEN_MAP_PATH.with_suffix(TOKEN_MAP_PATH.suffix + ".lock")
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Unwritable location — fall back to in-process locking only.
+            yield False
+            return
+        try:
+            with open(lock_path, "w") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield True
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            yield False
+
+    def _read_unlocked(self) -> tuple[dict[str, str], dict[str, int]]:
+        if not TOKEN_MAP_PATH.exists():
+            return {}, {}
+        try:
+            data = json.loads(TOKEN_MAP_PATH.read_text())
+            return data.get("forward", {}) or {}, data.get("counters", {}) or {}
+        except Exception:
+            return {}, {}
+
+    def _write_unlocked(self):
         try:
             TOKEN_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
-            TOKEN_MAP_PATH.write_text(json.dumps(
+            payload = json.dumps(
                 {"forward": self.forward, "counters": self.counters}, indent=2
-            ))
+            )
+            # Atomic replace so a reader never sees a half-written map.
+            tmp = TOKEN_MAP_PATH.with_suffix(TOKEN_MAP_PATH.suffix + ".tmp")
+            tmp.write_text(payload)
+            tmp.replace(TOKEN_MAP_PATH)
         except Exception:
             pass  # Token map is best-effort; don't crash the proxy
 
+    def _load(self):
+        with self._locked_file():
+            self.forward, self.counters = self._read_unlocked()
+
+    def _merge_from_disk(self):
+        """Adopt entries a sibling proxy wrote since we last looked."""
+        disk_forward, disk_counters = self._read_unlocked()
+        for value, token in disk_forward.items():
+            self.forward.setdefault(value, token)
+        for prefix, n in disk_counters.items():
+            # Never hand back a number a sibling already issued.
+            self.counters[prefix] = max(self.counters.get(prefix, 0), n)
+
+    # -- api --------------------------------------------------------------- #
     def get_or_create(self, value: str, prefix: str) -> str:
         """Return the token for *value* (creating one if needed)."""
         if not value or not value.strip():
@@ -78,16 +155,27 @@ class TokenMap:
             existing = self.forward.get(value)
             if existing:
                 return existing
-            n = self.counters.get(prefix, 0) + 1
-            self.counters[prefix] = n
-            token = f"{prefix}_{n}"
-            self.forward[value] = token
-            self._save()
-            return token
+            with self._locked_file():
+                # Re-read inside the lock: a sibling may have just assigned
+                # this very value, in which case we must reuse its token.
+                self._merge_from_disk()
+                existing = self.forward.get(value)
+                if existing:
+                    return existing
+                n = self.counters.get(prefix, 0) + 1
+                self.counters[prefix] = n
+                token = f"{prefix}_{n}"
+                self.forward[value] = token
+                self._write_unlocked()
+                return token
 
     def reverse_all(self) -> dict[str, str]:
-        """Return a token → original_value mapping for de-anonymization."""
+        """Return a token -> original_value mapping for de-anonymization."""
         with self._lock:
+            with self._locked_file():
+                # Pick up tokens issued by sibling proxies so a report written
+                # after a CoPilot search still de-anonymizes fully.
+                self._merge_from_disk()
             return {tok: orig for orig, tok in self.forward.items()}
 
 
@@ -156,7 +244,10 @@ class Anonymizer:
         self._scan_user_paths: bool = config.get("scan_user_paths", True)
         self._scan_inline_ips: bool = config.get("scan_inline_ips", True)
 
-    def _anonymize_string(self, field_name: str, value: str) -> str:
+    #: Guard against pathological nesting while still reaching real payloads.
+    _MAX_JSON_DEPTH = 6
+
+    def _anonymize_string(self, field_name: str, value: str, depth: int = 0) -> str:
         """Anonymize a single string value for a given field."""
         if not value:
             return value
@@ -172,8 +263,39 @@ class Anonymizer:
         if prefix:
             return self.token_map.get_or_create(value, prefix)
 
+        # A string that is itself JSON must be walked, not pattern-scanned.
+        #
+        # Field-name mapping is the only thing that catches a hostname or
+        # username; pattern scanning finds just IPs and user paths. So a nested
+        # document treated as an opaque string silently loses most of its
+        # anonymization. This is not hypothetical: FastMCP serializes the
+        # CoPilot tools' content blocks as an ordinary return value, so their
+        # results arrive double-wrapped and the real event sits one layer
+        # deeper than the transport content.
+        nested = self._maybe_json(value, depth)
+        if nested is not None:
+            return nested
+
         # No direct mapping — apply pattern-based scanning
         return self._scan_patterns(value)
+
+    def _maybe_json(self, value: str, depth: int):
+        """If *value* is a JSON object/array, anonymize inside it and re-encode."""
+        if depth >= self._MAX_JSON_DEPTH:
+            return None
+        stripped = value.lstrip()
+        if not stripped.startswith(("{", "[")):
+            return None
+        try:
+            # strict=False: log payloads routinely carry raw control characters.
+            parsed = json.loads(value, strict=False)
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            return None
+        if not isinstance(parsed, (dict, list)):
+            return None
+        return json.dumps(
+            self.anonymize_obj(parsed, depth=depth + 1), ensure_ascii=False
+        )
 
     def _scan_patterns(self, text: str) -> str:
         """Apply pattern-based anonymization to an arbitrary text string."""
@@ -202,21 +324,21 @@ class Anonymizer:
 
         return text
 
-    def anonymize_obj(self, obj: Any, parent_key: str = "") -> Any:
+    def anonymize_obj(self, obj: Any, parent_key: str = "", depth: int = 0) -> Any:
         """Recursively walk a deserialized JSON object and anonymize PII values."""
         if isinstance(obj, dict):
-            return {k: self._anonymize_value(k, v) for k, v in obj.items()}
+            return {k: self._anonymize_value(k, v, depth) for k, v in obj.items()}
         elif isinstance(obj, list):
-            return [self.anonymize_obj(item, parent_key) for item in obj]
+            return [self.anonymize_obj(item, parent_key, depth) for item in obj]
         elif isinstance(obj, str):
             return self._scan_patterns(obj)
         else:
             return obj
 
-    def _anonymize_value(self, key: str, value: Any) -> Any:
+    def _anonymize_value(self, key: str, value: Any, depth: int = 0) -> Any:
         if isinstance(value, str):
-            return self._anonymize_string(key, value)
-        return self.anonymize_obj(value, key)
+            return self._anonymize_string(key, value, depth)
+        return self.anonymize_obj(value, key, depth)
 
     def anonymize_content_blocks(self, content: list) -> list:
         """Anonymize MCP tool-result content blocks (list of {type, text})."""
@@ -227,7 +349,7 @@ class Anonymizer:
                 continue
             text = block.get("text", "")
             try:
-                parsed = json.loads(text)
+                parsed = json.loads(text, strict=False)
                 anon = self.anonymize_obj(parsed)
                 text = json.dumps(anon, ensure_ascii=False)
             except (json.JSONDecodeError, ValueError):
@@ -365,14 +487,15 @@ class Proxy:
         }
 
     def run(self):
-        if not OPENSEARCH_WRAPPER.exists():
+        if not CHILD_WRAPPER.exists():
             sys.stderr.write(
-                f"[anon-proxy] ERROR: opensearch-mcp.sh not found at {OPENSEARCH_WRAPPER}\n"
+                f"[anon-proxy:{PROXY_LABEL}] ERROR: wrapped MCP server not found at "
+                f"{CHILD_WRAPPER}. Set ANON_PROXY_CHILD to the wrapper to proxy.\n"
             )
             sys.exit(1)
 
         child = subprocess.Popen(
-            [str(OPENSEARCH_WRAPPER)],
+            [str(CHILD_WRAPPER)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=sys.stderr,
