@@ -35,7 +35,13 @@ import { OneCLI } from '@onecli-sh/sdk';
 import { validateAdditionalMounts } from './mount-security.js';
 import { ContainerConfig, RegisteredGroup } from './types.js';
 
-const onecli = new OneCLI({ url: ONECLI_URL });
+// The SDK authenticates to /api/container-config with an `oc_...` user API
+// key. It falls back to process.env.ONECLI_API_KEY, but NanoClaw never loads
+// .env into process.env — so without passing it explicitly the SDK has no
+// credential, applyContainerConfig always fails, and every container silently
+// falls through to the .env path and starts unauthenticated.
+const { ONECLI_API_KEY } = readEnvFile(['ONECLI_API_KEY']);
+const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -473,30 +479,59 @@ async function buildContainerArgs(
   // upstream secrets to inject and we don't want the proxy intercepting our
   // ANTHROPIC_BASE_URL redirect.
   if (containerConfig?.provider !== 'ollama') {
-    const onecliApplied = await onecli.applyContainerConfig(args, {
-      addHostMapping: false, // Nanoclaw already handles host gateway
-      agent: agentIdentifier,
-    });
+    let onecliApplied = false;
+    try {
+      onecliApplied = await onecli.applyContainerConfig(args, {
+        addHostMapping: false, // Nanoclaw already handles host gateway
+        agent: agentIdentifier,
+      });
+    } catch (err) {
+      // Previously this threw away the reason and looked identical to "OneCLI
+      // not configured", which is a slow thing to debug from a container that
+      // only reports "Please run /login".
+      logger.warn(
+        { containerName, agent: agentIdentifier, err },
+        'OneCLI container config failed — falling back to .env credentials',
+      );
+    }
     if (onecliApplied) {
       logger.info({ containerName }, 'OneCLI gateway config applied');
-    } else {
-      const { CLAUDE_CODE_OAUTH_TOKEN } = readEnvFile([
-        'CLAUDE_CODE_OAUTH_TOKEN',
-      ]);
-      if (CLAUDE_CODE_OAUTH_TOKEN) {
-        // Long-lived OAuth token (generated via `claude setup-token`) — inject
-        // directly so containers authenticate without a separate login.
-        args.push('-e', `CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}`);
-        logger.info(
-          { containerName },
-          'Injecting CLAUDE_CODE_OAUTH_TOKEN into container',
-        );
-      } else {
-        logger.warn(
-          { containerName },
-          'No credentials available — container may fail to authenticate',
-        );
-      }
+    }
+
+    // A Claude subscription token is injected directly even when OneCLI is
+    // active, because OneCLI cannot carry this auth flow.
+    //
+    // `claude setup-token` does not mint a bearer token for /v1/messages. The
+    // CLI first exchanges it at /api/oauth/claude_cli/create_api_key for a
+    // short-lived key, then uses that. OneCLI does static header injection on
+    // a host pattern and has no concept of that exchange, so it stamps the
+    // setup token onto /v1/messages, where Anthropic rejects it with
+    // "OAuth access token is invalid" — the gateway reports
+    // injections_applied=1 and no create_api_key call is ever made.
+    //
+    // So for subscription auth the token goes to the CLI and the exchange
+    // happens in-container. Detach the Anthropic secret from the OneCLI agent
+    // as well, or the gateway will overwrite the CLI's own Authorization
+    // header on the way out. OneCLI still supplies the proxy, CA bundle and
+    // any non-Anthropic secrets.
+    //
+    // Note this means the token is visible inside the container; an API key
+    // through the OneCLI vault is the option that avoids that, at the cost of
+    // not using subscription capacity.
+    const { CLAUDE_CODE_OAUTH_TOKEN } = readEnvFile([
+      'CLAUDE_CODE_OAUTH_TOKEN',
+    ]);
+    if (CLAUDE_CODE_OAUTH_TOKEN) {
+      args.push('-e', `CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}`);
+      logger.info(
+        { containerName, viaOneCLI: onecliApplied },
+        'Injecting CLAUDE_CODE_OAUTH_TOKEN into container',
+      );
+    } else if (!onecliApplied) {
+      logger.warn(
+        { containerName },
+        'No credentials available — container may fail to authenticate',
+      );
     }
   } else {
     logger.info(
