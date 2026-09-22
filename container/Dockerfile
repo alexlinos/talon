@@ -50,10 +50,15 @@ RUN chmod 0755 /usr/local/bin/mysql-query
 RUN python3 -m venv /opt/opensearch-mcp \
     && /opt/opensearch-mcp/bin/pip install --quiet opensearch-mcp-server pyyaml
 
-# Install copilot-mcp-server into a system venv (used by the CoPilot MCP wrapper)
+# Install copilot-mcp-server into a system venv (used by the CoPilot MCP wrapper).
+# Talon fork of socfortress/copilot-mcp-server — adds the threat-hunting tools
+# (SearchEventsTool, GetAlertTool, ListIndicesTool, GetAgentTool), so this is
+# installed from vendored source staged by container/build.sh, NOT from GitHub.
+# NOTE: buildkit caches COPY aggressively. If a source change does not show up
+# in the image, prune the builder before rebuilding (see CLAUDE.md).
+COPY vendor/copilot-mcp /opt/copilot-mcp-src
 RUN python3 -m venv /opt/copilot-mcp \
-    && /opt/copilot-mcp/bin/pip install --quiet \
-       "git+https://github.com/socfortress/copilot-mcp-server.git"
+    && /opt/copilot-mcp/bin/pip install --quiet /opt/copilot-mcp-src
 
 # Install wazuh-mcp-server into a system venv (used by the Wazuh MCP wrapper)
 RUN python3 -m venv /opt/wazuh-mcp \

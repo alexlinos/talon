@@ -41,11 +41,17 @@ function detectProxyBindHost(): string {
 
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
-  // On Linux, host.docker.internal isn't built-in — add it explicitly
-  if (os.platform() === 'linux') {
-    return ['--add-host=host.docker.internal:host-gateway'];
-  }
-  return [];
+  // host.docker.internal is only provided automatically by Docker Desktop.
+  // Plain Docker Engine on Linux does not define it, and neither do the
+  // macOS alternatives — Colima, Rancher Desktop, and anything else backed by
+  // a Lima VM. This used to be gated on platform === 'linux', which left
+  // macOS + Colima with no mapping at all: containers resolved nothing and
+  // died with ENOTFOUND the moment anything (e.g. the OneCLI gateway proxy)
+  // pointed at host.docker.internal.
+  //
+  // Adding it unconditionally is safe: on Docker Desktop the explicit mapping
+  // resolves to the same gateway the built-in name already points at.
+  return ['--add-host=host.docker.internal:host-gateway'];
 }
 
 /** Returns CLI args for a readonly bind mount. */

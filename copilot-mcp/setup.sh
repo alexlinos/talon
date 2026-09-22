@@ -50,10 +50,12 @@ else
 fi
 
 # ── Install copilot-mcp-server ────────────────────────────────────────────────
-echo "Installing copilot-mcp-server from GitHub..."
+# Installed from the vendored source in this directory, not from GitHub: this is
+# a Talon fork of socfortress/copilot-mcp-server that adds the threat-hunting
+# tools. See README.md ("Fork status") for what diverges from upstream.
+echo "Installing copilot-mcp-server from vendored source..."
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet \
-    "git+https://github.com/socfortress/copilot-mcp-server.git"
+"$VENV_DIR/bin/pip" install --quiet -e "$SCRIPT_DIR"
 echo "copilot-mcp-server installed  ✓"
 
 # ── .env ─────────────────────────────────────────────────────────────────────
@@ -68,6 +70,13 @@ else
 fi
 
 chmod +x "$MCP_WRAPPER"
+
+# ── Dev dependencies (optional) ───────────────────────────────────────────────
+if [[ "${1:-}" == "--dev" ]]; then
+    echo "Installing dev dependencies (pytest, black, flake8)..."
+    "$VENV_DIR/bin/pip" install --quiet -e "$SCRIPT_DIR[dev]"
+    echo "dev dependencies installed  ✓"
+fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""

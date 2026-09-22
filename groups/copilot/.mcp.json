@@ -12,6 +12,9 @@
     "copilot": {
       "command": "/workspace/extra/copilot-mcp/copilot-mcp.sh"
     },
+    "copilot_anon": {
+      "command": "/workspace/extra/siem/anon-copilot-mcp.sh"
+    },
     "wazuh": {
       "command": "/workspace/extra/wazuh-mcp/wazuh-mcp.sh"
     },

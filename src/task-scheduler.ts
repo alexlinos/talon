@@ -52,7 +52,11 @@ export function computeNextRun(task: ScheduledTask): string | null {
     }
     // Anchor to the scheduled time, not now, to prevent drift.
     // Skip past any missed intervals so we always land in the future.
-    let next = new Date(task.next_run!).getTime() + ms;
+    // A task with no next_run (see repairStrandedTasks) has no anchor, so
+    // start from now — otherwise the date math yields NaN and toISOString()
+    // throws.
+    const anchor = task.next_run ? new Date(task.next_run).getTime() : now;
+    let next = anchor + ms;
     while (next <= now) {
       next += ms;
     }
@@ -240,6 +244,52 @@ async function runTask(
   updateTaskAfterRun(task.id, nextRun, resultSummary);
 }
 
+/**
+ * Give active recurring tasks with no next_run a next_run.
+ *
+ * getDueTasks only selects rows where next_run IS NOT NULL, so an active task
+ * whose next_run is NULL is never picked up — and nothing reports it. That
+ * happens whenever a task is switched to active without recomputing next_run,
+ * e.g. a seeded-paused task enabled with a direct UPDATE. In production the
+ * 15-minute alert digest sat exactly like this for months: status=active,
+ * next_run=NULL, zero entries in task_run_logs.
+ *
+ * Runs every tick rather than only at startup, because the status flip can
+ * happen underneath a running process. Paused tasks are left alone (reviving
+ * them is not our call), as are one-shot tasks, where a NULL next_run means
+ * the run already happened.
+ */
+export function repairStrandedTasks(): number {
+  let repaired = 0;
+  for (const task of getAllTasks()) {
+    if (
+      task.status !== 'active' ||
+      task.next_run ||
+      task.schedule_type === 'once'
+    ) {
+      continue;
+    }
+    let nextRun: string | null;
+    try {
+      nextRun = computeNextRun(task);
+    } catch (err) {
+      logger.error(
+        { taskId: task.id, err },
+        'Active task has no next_run and it could not be computed',
+      );
+      continue;
+    }
+    if (!nextRun) continue;
+    updateTask(task.id, { next_run: nextRun });
+    repaired++;
+    logger.warn(
+      { taskId: task.id, scheduleType: task.schedule_type, nextRun },
+      'Active task had no next_run and would never have run — scheduled it',
+    );
+  }
+  return repaired;
+}
+
 let schedulerRunning = false;
 
 export function startSchedulerLoop(deps: SchedulerDependencies): void {
@@ -252,6 +302,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
   const loop = async () => {
     try {
+      repairStrandedTasks();
       const dueTasks = getDueTasks();
       if (dueTasks.length > 0) {
         logger.info({ count: dueTasks.length }, 'Found due tasks');

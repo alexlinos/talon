@@ -166,6 +166,188 @@ export class HttpChannel implements Channel {
     );
   }
 
+  private seedThreatHuntTask(): void {
+    const TASK_ID = 'copilot-threat-hunt-daily';
+    if (getTaskById(TASK_ID)) return;
+
+    // Seeded paused. This sweeps every customer and fans out a dozen searches
+    // per source, so it should not start firing on its own the moment someone
+    // upgrades. Enable it deliberately once the schedule and scope look right.
+    const task = {
+      id: TASK_ID,
+      group_folder: COPILOT_GROUP_FOLDER,
+      chat_jid: WEBHOOK_JID,
+      schedule_type: 'cron' as const,
+      schedule_value: '0 7 * * *',
+      context_mode: 'group' as const,
+      status: 'paused' as const,
+      created_at: new Date().toISOString(),
+      next_run: null as string | null,
+      prompt: `You are running as a scheduled daily threat hunt. This is proactive
+hunting across the estate, NOT alert triage — there is no alert to investigate
+and nothing to write back to an AI-analyst job.
+
+PRIVACY — read this first. Event search MUST go through the anonymizing proxy:
+use mcp__copilot_anon__SearchEventsTool, never mcp__copilot__SearchEventsTool.
+The raw server puts hostnames and usernames into context untokenized. The proxy
+shares its token map with mcp__opensearch_anon__, so hosts read consistently
+across both. Call mcp__opensearch_anon__deanonymize on the finished report text
+before sending it, so the analyst sees real names.
+
+STEP 1 — SCOPE
+  a. mcp__copilot__GetCustomersTool() to list customers.
+  b. For each customer: mcp__copilot_anon__ListEventSourcesTool(customer_code)
+     to get its searchable sources. Hunt every (customer, source) pair.
+
+STEP 2 — AGENT GAPS
+An agent that stopped reporting is an unmonitored host, and silence looks
+identical to "nothing happened" — so check this before hunting.
+  a. mcp__wazuh__GetAgentsTool(status="disconnected") and
+     mcp__wazuh__GetAgentsTool(status="never_connected").
+  b. For anything that looks stale, confirm CoPilot's own view with
+     mcp__copilot__GetAgentTool(agent_id=<id>) and read agent_last_seen.
+  c. Report any agent last seen more than 24 hours ago. Call out
+     crown-jewel or server assets first — check MemPalace room "assets" for
+     the customer if you need to know which those are.
+
+STEP 3 — HUNTS
+For each (customer, source), run these with timeframe="last_24h" and limit=25.
+Keep the limit modest: results are capped and excess hits are dropped.
+
+Search is full-text across every field, including the verbose Windows message
+blob and FIM permission strings, and it ANDs bare terms rather than matching
+them as a phrase. Both facts produce false positives.
+
+ALWAYS WRAP A MULTI-WORD QUERY IN DOUBLE QUOTES, and include the quotes in the
+query value itself. Measured: net group (unquoted) returned 20 events a day,
+none of which contained that phrase — it matched any document holding "net" and
+"group" separately. The quoted form "net group" returned 0. Single words need
+no quotes.
+
+Generic single words are useless for the same reason. Two measured examples,
+both since removed: lsass returned 251 events a day, every one matching inside
+data_win_system_message on Exchange database noise; domain admins matched
+syscheck_win_perm_after, because Windows ACL strings literally name Domain
+Admins as a permission holder. Neither found a single real event. Prefer tool
+names and command fragments that only appear on a command line or image path.
+
+Counts in brackets are hits/day measured on this estate when the hunt was
+written — a baseline, not a rule. A query that suddenly returns far more than
+its baseline is itself worth a look.
+
+  Credential access
+   1. mimikatz                     [0]
+   2. sekurlsa                     [0]
+   3. comsvcs                      [0]   LSASS dump via LOLBin
+   4. procdump                     [0]
+  Execution and obfuscation
+   5. "powershell -enc"            [0]
+   6. FromBase64String             [2]
+   7. "-nop -w hidden"             [0]
+   8. "mshta http"                 [0]
+   9. regsvr32                     [6]   lands on the image field, Sysmon EID 1
+  Ingress and download
+  10. "certutil -urlcache"         [0]
+  11. "bitsadmin /transfer"        [0]
+  12. Invoke-WebRequest            [6]   lands on the command line, Sysmon EID 1
+  13. DownloadString               [0]
+  Persistence
+  14. "schtasks /create"           [135] mostly descendants — see triage
+  Discovery
+  15. "net group"                  [0]   replaces the unquoted form, and "domain admins"
+  16. "net localgroup"             [0]
+  17. "whoami /all"                [0]
+  Lateral movement
+  18. psexec                       [1]
+  19. "wmic process call create"   [0]
+  Defense evasion and impact
+  20. "vssadmin delete"            [0]   ransomware precursor
+  21. "wevtutil cl"                [0]   log clearing
+  Exfiltration
+  22. ngrok                        [0]
+
+Deliberately excluded as measured noise: lsass, domain admins, MiniDump
+(100+/day in the message blob), rundll32 (100+/day across 42 hosts on Sysmon
+EID 13 registry events). Do not re-add these without a narrowing term.
+
+For every hit, note: timestamp, host, user, rule_id, rule_description, and the
+matched_fields that explain WHY it matched. matched_fields is the fastest way
+to spot a bogus hit: if a query matched only "message" or
+"data_win_system_message" rather than a command-line or image field, it almost
+certainly landed in verbose log prose, not on real activity. Set
+include_raw=true only when you need a field the shaped view omits, and only
+with a small limit.
+
+STEP 4 — TRIAGE
+Most hits will be benign. Before reporting anything, rule out the obvious:
+  - Is this a known-good admin pattern for the environment? Check MemPalace
+    (mempalace_search, wing=<customer_code>, room="environment") and
+    room="false_positives" before calling anything suspicious.
+  - Is the same command running on many hosts on a schedule? That is usually
+    management tooling, not an intrusion.
+  - Check matched_fields first, before anything else. Two patterns account for
+    almost all false positives:
+      * Matched only in "message", "data_win_system_message",
+        "data_win_eventdata_data" or "syscheck_win_perm_after" — the query
+        landed in verbose log prose or an ACL string, not on real activity.
+        Discard without further work.
+      * Matched only in "data_win_eventdata_parentCommandLine" — this event is
+        a DESCENDANT of the command you hunted for, not the command itself.
+        Measured on "schtasks /create": 95 of 100 hits were children of
+        scheduled tasks and only 5 were actual task creations, which collapsed
+        to a single distinct command. Group these by their distinct parent
+        value and report the parent once, if at all — never one line per child.
+    Whatever survives both checks is what is worth a human's attention.
+Enrich genuinely suspicious IOCs with mcp__cve__* (virustotal_lookup,
+lookup_ip_reputation, check_ip_noise) before escalating.
+
+STEP 5 — REPORT
+If nothing survived triage AND no agent gaps were found, send exactly one short
+line saying the hunt ran clean, with the customers and sources covered. Do not
+pad it. A daily no-op that shouts gets ignored, and then the one real finding
+gets ignored too.
+
+Otherwise call mcp__opensearch_anon__deanonymize on your full draft, then
+send_message:
+
+  Daily Threat Hunt — <date>
+  Scope: <customers> | Sources: <sources> | Window: last 24h
+
+  AGENT GAPS
+  <table: agent, host, last seen, how long silent> — or "none"
+
+  FINDINGS
+  For each, most severe first:
+    <what matched, and the hunt that caught it>
+    Host / user / time, rule_id and description
+    Why it survived triage — what you ruled out
+    Recommended next step
+
+  CHECKED, NOTHING FOUND
+  <one line listing the hunts that came back clean>
+
+STEP 6 — REMEMBER (best-effort)
+For each confirmed finding, record it with mempalace_add_drawer
+(wing=<customer_code>, room="threat_intel"). For anything you ruled out as a
+known-good pattern, record it in room="false_positives" so tomorrow's hunt
+does not re-raise it. If MemPalace is unavailable, skip this step — never fail
+the hunt over it.
+
+ERROR HANDLING
+If one customer, source, or hunt query fails, carry on with the rest and list
+what failed at the end of the report. A partial hunt is useful; a hunt that
+aborts on the first error is not.`,
+    };
+
+    const fullTask = { ...task, last_run: null, last_result: null };
+    fullTask.next_run = computeNextRun(fullTask);
+    createTask(fullTask);
+    logger.info(
+      { taskId: TASK_ID, schedule: task.schedule_value, status: task.status },
+      'Seeded CoPilot daily threat hunt scheduled task (paused)',
+    );
+  }
+
   async connect(): Promise<void> {
     if (!HTTP_API_KEY) {
       throw new Error(
@@ -240,6 +422,7 @@ export class HttpChannel implements Channel {
     };
     this.opts.registerGroup?.(COPILOT_JID, group);
     this.seedAlertDigestTask();
+    this.seedThreatHuntTask();
 
     this.opts.onChatMetadata(
       COPILOT_JID,

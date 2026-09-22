@@ -199,7 +199,12 @@ The agent has **read-only** access to MySQL. All writes go through CoPilot REST 
 
 > **Status:** MCP tools under development in CoPilot. NanoClaw-side integration pending.
 
-### MCP Tools (from `github.com/socfortress/copilot-mcp-server`)
+### MCP Tools (from the Talon fork in `copilot-mcp/`)
+
+> Forked from `github.com/socfortress/copilot-mcp-server` and vendored into the
+> tree. Upstream's write-back tools below are unchanged; the fork adds the
+> threat-hunting tools listed at the end. See `copilot-mcp/README.md`.
+
 
 **Customers**
 
@@ -238,6 +243,27 @@ The agent has **read-only** access to MySQL. All writes go through CoPilot REST 
 | Tool | Method + Path | Purpose |
 |------|--------------|---------|
 | `GetAlertAiAnalysisTool` | `GET /api/ai_analyst/alert/{alert_id}` | Fetch complete bundle: job + latest report + all IOCs |
+
+**Threat hunting (Talon fork)**
+
+Read-only. Added for the daily threat hunt and for alert-triage enrichment.
+Paths verified against the live instance on 2026-09-14.
+
+| Tool | Method + Path | Purpose |
+|------|--------------|---------|
+| `SearchEventsTool` | `GET /api/siem/events/{customer_code}/{source_name}` | Free-text event search; `timerange` (`24h`/`7d`/`2w`) or `time_from`/`time_to` |
+| `ListEventSourcesTool` | `GET /api/siem/event_sources/{customer_code}` | Sources a customer's search can target |
+| `GetAlertTool` | `GET /api/incidents/db_operations/alert/{alert_id}` | Full detail for one alert |
+| `ListIndicesTool` | `GET /api/wazuh_indexer/indices` | Raw indexer inventory (health, doc counts) |
+| `GetAgentTool` | `GET /api/agents/{agent_id}` | Agent last-seen + status, for agent-gap hunts |
+
+> **Search is scoped per customer and source.** There is no global free-text
+> endpoint, so `customer_code` is required and a broad hunt fans out over the
+> customer's event sources. Note `ListEventSourcesTool` (search targets) and
+> `ListIndicesTool` (index inventory) are not interchangeable.
+>
+> Re-check the paths after a CoPilot upgrade with
+> `copilot-mcp/scripts/verify_endpoints.py`.
 
 ---
 

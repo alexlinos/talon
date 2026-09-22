@@ -8,6 +8,11 @@ dist/
 store/
 data/
 logs/
+# Runtime SQLite db — group state and message history. store/ was already
+# covered; this one was not, so `git add -A` would sweep it in.
+# The -wal/-shm sidecars appear whenever SQLite runs in WAL mode.
+nanoclaw.db
+nanoclaw.db-*
 
 # Groups - only track base structure and specific CLAUDE.md files
 groups/*
@@ -56,3 +61,12 @@ cve-mcp/.venv/
 .nanoclaw/
 
 agents-sdk-docs
+
+# Staged by container/build.sh for the copilot-mcp fork install
+container/vendor/
+
+# Service TMPDIR — bind-mount sources must sit on a VM-visible path
+tmp/
+
+# Backups of .env made while editing — they hold live credentials
+.env.bak

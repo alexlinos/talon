@@ -4,6 +4,7 @@ import { _initTestDatabase, createTask, getTaskById } from './db.js';
 import {
   _resetSchedulerLoopForTests,
   computeNextRun,
+  repairStrandedTasks,
   startSchedulerLoop,
 } from './task-scheduler.js';
 
@@ -125,5 +126,113 @@ describe('task scheduler', () => {
     const offset =
       (new Date(nextRun!).getTime() - new Date(scheduledTime).getTime()) % ms;
     expect(offset).toBe(0);
+  });
+
+  describe('stranded tasks (active, next_run NULL)', () => {
+    const base = {
+      group_folder: 'copilot',
+      chat_jid: 'webhook@nanoclaw',
+      prompt: 'run',
+      context_mode: 'group' as const,
+      created_at: '2026-05-04T19:04:50.446Z',
+    };
+
+    it('schedules an active cron task that has no next_run', () => {
+      // The production case: the alert digest, active since May, never run.
+      createTask({
+        ...base,
+        id: 'copilot-alert-digest-15m',
+        schedule_type: 'cron',
+        schedule_value: '*/15 * * * *',
+        next_run: null,
+        status: 'active',
+      });
+
+      expect(repairStrandedTasks()).toBe(1);
+      const task = getTaskById('copilot-alert-digest-15m');
+      expect(task?.next_run).toBeTruthy();
+      expect(new Date(task!.next_run!).getTime()).toBeGreaterThan(Date.now());
+    });
+
+    it('schedules an interval task without throwing on the missing anchor', () => {
+      createTask({
+        ...base,
+        id: 'stranded-interval',
+        schedule_type: 'interval',
+        schedule_value: String(60 * 60 * 1000),
+        next_run: null,
+        status: 'active',
+      });
+
+      expect(() => repairStrandedTasks()).not.toThrow();
+      const next = new Date(
+        getTaskById('stranded-interval')!.next_run!,
+      ).getTime();
+      expect(next).toBeGreaterThan(Date.now());
+      expect(next).toBeLessThanOrEqual(Date.now() + 60 * 60 * 1000);
+    });
+
+    it('does not revive paused tasks', () => {
+      createTask({
+        ...base,
+        id: 'paused-cron',
+        schedule_type: 'cron',
+        schedule_value: '*/15 * * * *',
+        next_run: null,
+        status: 'paused',
+      });
+
+      expect(repairStrandedTasks()).toBe(0);
+      expect(getTaskById('paused-cron')?.next_run).toBeNull();
+    });
+
+    it('leaves finished one-shot tasks alone', () => {
+      createTask({
+        ...base,
+        id: 'done-once',
+        schedule_type: 'once',
+        schedule_value: '2026-02-22T00:00:00.000Z',
+        next_run: null,
+        status: 'active',
+      });
+
+      expect(repairStrandedTasks()).toBe(0);
+      expect(getTaskById('done-once')?.next_run).toBeNull();
+    });
+
+    it('is repaired by the scheduler loop itself, not just on demand', async () => {
+      createTask({
+        ...base,
+        id: 'loop-repaired',
+        schedule_type: 'cron',
+        schedule_value: '*/15 * * * *',
+        next_run: null,
+        status: 'active',
+      });
+
+      startSchedulerLoop({
+        registeredGroups: () => ({}),
+        getSessions: () => ({}),
+        queue: { enqueueTask: vi.fn() } as any,
+        onProcess: () => {},
+        sendMessage: async () => {},
+      });
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(getTaskById('loop-repaired')?.next_run).toBeTruthy();
+    });
+
+    it('computeNextRun handles an interval task with no next_run', () => {
+      const next = computeNextRun({
+        ...base,
+        id: 'x',
+        schedule_type: 'interval',
+        schedule_value: '60000',
+        next_run: null,
+        status: 'active',
+      } as any);
+      expect(next).toBeTruthy();
+      expect(Number.isNaN(new Date(next!).getTime())).toBe(false);
+    });
   });
 });

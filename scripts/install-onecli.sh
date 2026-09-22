@@ -12,7 +12,8 @@
 #   5. If no API key, print bootstrap instructions and exit cleanly
 #
 # Optional env vars:
-#   ONECLI_PORT          gateway port (default: 10254)
+#   ONECLI_PORT          dashboard/gateway port (default: 10254)
+#   ONECLI_API_PORT      management API port (default: 10256)
 #   ONECLI_SCHEME        http | https (default: http). Set https when
 #                        the gateway is fronted by TLS in production.
 #   ONECLI_INSECURE_TLS  0 | 1 (default: 0). Pair with ONECLI_SCHEME=https
@@ -31,6 +32,8 @@
 set -euo pipefail
 
 ONECLI_PORT="${ONECLI_PORT:-10254}"
+# Management API port for OneCLI 2.x (see CANDIDATES below).
+ONECLI_API_PORT="${ONECLI_API_PORT:-10256}"
 # Scheme used when assembling candidate gateway URLs. Defaults to `http`
 # for back-compat with local-dev / loopback installations. Set to
 # `https` for production deployments where the gateway is fronted by
@@ -52,6 +55,11 @@ esac
 # Curl flags shared by every probe + auth call. -k is gated by the
 # explicit opt-in env var so an https deployment with a real cert
 # behaves strictly.
+# Expanded below as ${CURL_TLS_FLAGS[@]+"${CURL_TLS_FLAGS[@]}"} rather than
+# "${CURL_TLS_FLAGS[@]}". macOS ships bash 3.2, where expanding an EMPTY
+# array under `set -u` raises "unbound variable" — and this array is empty
+# whenever ONECLI_INSECURE_TLS=0, which is the default. The plain form
+# therefore aborted this script on every stock macOS host.
 CURL_TLS_FLAGS=()
 if [ "$ONECLI_SCHEME" = "https" ] && [ "$ONECLI_INSECURE_TLS" = "1" ]; then
   CURL_TLS_FLAGS+=("-k")
@@ -214,11 +222,20 @@ if [ -d /sys/class/net/docker0 ]; then
 fi
 CANDIDATES+=("${ONECLI_SCHEME}://127.0.0.1:${ONECLI_PORT}")
 CANDIDATES+=("${ONECLI_SCHEME}://localhost:${ONECLI_PORT}")
+# OneCLI 2.x splits the stack across ports: the web dashboard listens on
+# 10254, the proxy gateway on 10255, and the management API — /api/agents and
+# /api/secrets, which is what ONECLI_URL is actually used for — on 10256.
+# ONECLI_PORT still defaults to 10254 for back-compat with single-port
+# installs, so probe the API port too. probe_health only accepts a host that
+# answers /api/health, which the dashboard port does not, so the right one
+# wins regardless of order.
+CANDIDATES+=("${ONECLI_SCHEME}://127.0.0.1:${ONECLI_API_PORT}")
+CANDIDATES+=("${ONECLI_SCHEME}://localhost:${ONECLI_API_PORT}")
 
 probe_health() {
   # OneCLI 1.5+ uses /api/health; fall back to /health for older versions.
-  curl -sf "${CURL_TLS_FLAGS[@]}" -m 2 "${1}/api/health" >/dev/null 2>&1 || \
-    curl -sf "${CURL_TLS_FLAGS[@]}" -m 2 "${1}/health" >/dev/null 2>&1
+  curl -sf ${CURL_TLS_FLAGS[@]+"${CURL_TLS_FLAGS[@]}"} -m 2 "${1}/api/health" >/dev/null 2>&1 || \
+    curl -sf ${CURL_TLS_FLAGS[@]+"${CURL_TLS_FLAGS[@]}"} -m 2 "${1}/health" >/dev/null 2>&1
 }
 
 log "probing gateway candidates: ${CANDIDATES[*]}"
@@ -304,10 +321,10 @@ log "ensuring OneCLI agents for groups: ${DETECTED_GROUPS[*]}"
 # Helper: get JSON via HTTP API (no auth needed in single-user mode).
 # Inherits CURL_TLS_FLAGS so https + insecure-tls flows through here too.
 api_get() {
-  curl -sf "${CURL_TLS_FLAGS[@]}" -m 5 "${ONECLI_URL}$1" 2>/dev/null
+  curl -sf ${CURL_TLS_FLAGS[@]+"${CURL_TLS_FLAGS[@]}"} -m 5 "${ONECLI_URL}$1" 2>/dev/null
 }
 api_post() {
-  curl -sf "${CURL_TLS_FLAGS[@]}" -m 5 -X POST -H 'Content-Type: application/json' \
+  curl -sf ${CURL_TLS_FLAGS[@]+"${CURL_TLS_FLAGS[@]}"} -m 5 -X POST -H 'Content-Type: application/json' \
     -d "$2" "${ONECLI_URL}$1" 2>/dev/null
 }
 

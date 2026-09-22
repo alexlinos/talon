@@ -1,8 +1,10 @@
 # Anonymizing MCP Proxy — Field Definitions
 #
-# This file controls which OpenSearch fields are anonymized before their values
-# reach the cloud model context window. Add new fields here and git pull to
-# distribute updates to all deployments.
+# This file controls which fields are anonymized before their values reach the
+# cloud model context window. It governs every server behind the anonymizing
+# proxy — currently OpenSearch (anon-opensearch-mcp.sh) and the CoPilot hunt
+# tools (anon-copilot-mcp.sh). Add new fields here and git pull to distribute
+# updates to all deployments.
 #
 # Token format: <PREFIX>_<N>
 # Example: a user field containing "john.doe" becomes "USER_1" the first time
@@ -35,6 +37,11 @@ categories:
       - syscheck_uname_before
       - data_srcuser
       - data_dstuser
+      # Synthetic key emitted by the CoPilot hunt tools' normalize_hit()
+      # (copilot-mcp/copilot_mcp_server/hunt.py). It carries whichever of the
+      # raw user fields above was present, so it must be tokenized too —
+      # otherwise the shaped hit leaks the value that raw_fields tokenizes.
+      - user
 
   # ── Hostnames / Computer names ────────────────────────────────────────────
   hostname:
@@ -48,6 +55,9 @@ categories:
       - predecoder_hostname
       - manager_name
       - data_win_eventdata_targetServerName
+      # Synthetic key emitted by the CoPilot hunt tools' normalize_hit().
+      # Same reasoning as `user` above: it mirrors agent_name.
+      - host
 
   # ── Email addresses ───────────────────────────────────────────────────────
   email:
