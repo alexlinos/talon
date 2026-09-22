@@ -98,10 +98,14 @@ function setupLaunchd(
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <!-- /opt/homebrew/bin is required: launchd does not inherit the user's
+         shell PATH, and on Apple Silicon the container runtime binary
+         (see CONTAINER_RUNTIME_BIN in src/container-runtime.ts) lives
+         there. Without it every agent container spawn fails with ENOENT. -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
         <key>HOME</key>
         <string>${homeDir}</string>
     </dict>
@@ -245,7 +249,7 @@ Restart=always
 RestartSec=5
 KillMode=process
 Environment=HOME=${homeDir}
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin
+Environment=PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin
 StandardOutput=append:${projectRoot}/logs/nanoclaw.log
 StandardError=append:${projectRoot}/logs/nanoclaw.error.log
 
