@@ -67,3 +67,6 @@ container/vendor/
 
 # Service TMPDIR — bind-mount sources must sit on a VM-visible path
 tmp/
+
+# Backups of .env made while editing — they hold live credentials
+.env.bak
