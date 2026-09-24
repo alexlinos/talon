@@ -482,3 +482,49 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
   });
 });
+
+describe('GroupQueue per-container inbox', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('routes _close to the right container when two share a group folder', async () => {
+    // The production hang: /investigate (http:copilot) and the scheduled
+    // digest (webhook:copilot) are different JIDs for the same folder, so both
+    // can be live at once. With one shared inbox, the idle /investigate
+    // container consumed the _close meant for the digest, and the digest
+    // container never exited.
+    const fs = await import('fs');
+    const writeFileSync = vi.mocked(fs.default.writeFileSync);
+    writeFileSync.mockClear();
+
+    const queue = new GroupQueue();
+    queue.setProcessMessagesFn(
+      () => new Promise<boolean>(() => {}), // keep both containers active
+    );
+    queue.enqueueMessageCheck('http:copilot');
+    queue.enqueueMessageCheck('webhook:copilot');
+    await vi.advanceTimersByTimeAsync(10);
+
+    queue.registerProcess(
+      'http:copilot',
+      {} as any,
+      'c-investigate',
+      'copilot',
+    );
+    queue.registerProcess('webhook:copilot', {} as any, 'c-digest', 'copilot');
+
+    queue.closeStdin('webhook:copilot');
+
+    const closeTargets = writeFileSync.mock.calls
+      .map((call) => String(call[0]))
+      .filter((p) => p.endsWith('_close'));
+    expect(closeTargets).toHaveLength(1);
+    expect(closeTargets[0]).toContain('input-c-digest');
+    expect(closeTargets[0]).not.toContain('input-c-investigate');
+  });
+});
