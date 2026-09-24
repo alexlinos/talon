@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, spawn } from 'child_process';
+import { ChildProcess, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -774,7 +774,13 @@ export async function runContainerAgent(
         'Container timeout, stopping gracefully',
       );
       try {
-        stopContainer(containerName);
+        // stopContainer only builds the command string. It has to be run:
+        // before this, the timeout called it and discarded the result, so a
+        // container that went quiet was never stopped at all.
+        execSync(stopContainer(containerName), {
+          stdio: 'pipe',
+          timeout: 30_000,
+        });
       } catch (err) {
         logger.warn(
           { group: group.name, containerName, err },

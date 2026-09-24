@@ -67,7 +67,9 @@ vi.mock('./container-runtime.js', () => ({
   CONTAINER_HOST_GATEWAY: 'host.docker.internal',
   hostGatewayArgs: () => [],
   readonlyMountArgs: (h: string, c: string) => ['-v', `${h}:${c}:ro`],
-  stopContainer: vi.fn(),
+  // Mirror the real function: it only builds the command string. A bare
+  // vi.fn() hid the bug where the timeout never ran the command.
+  stopContainer: vi.fn((name: string) => `docker stop ${name}`),
 }));
 
 // Mock credential-proxy
@@ -101,6 +103,7 @@ vi.mock('child_process', async () => {
   return {
     ...actual,
     spawn: vi.fn(() => fakeProc),
+    execSync: vi.fn(),
     exec: vi.fn(
       (_cmd: string, _opts: unknown, cb?: (err: Error | null) => void) => {
         if (cb) cb(null);
@@ -230,5 +233,41 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+});
+
+describe('container-runner hard timeout', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('actually runs docker stop when the timeout fires', async () => {
+    // Before the fix, killOnTimeout called stopContainer() and threw away the
+    // command string it returns, so a container that went quiet was never
+    // stopped. In production one sat idle for 73 minutes.
+    const { execSync } = await import('child_process');
+    vi.mocked(execSync).mockClear();
+
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+    await vi.advanceTimersByTimeAsync(1830000);
+
+    expect(execSync).toHaveBeenCalledWith(
+      expect.stringMatching(/^docker stop nanoclaw-test-group-\d+$/),
+      expect.anything(),
+    );
+
+    fakeProc.emit('close', 137);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
   });
 });
