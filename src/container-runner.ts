@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, spawn } from 'child_process';
+import { ChildProcess, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -22,7 +22,11 @@ import {
   mergeProviderConfig,
   readEnvFile,
 } from './env.js';
-import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import {
+  resolveContainerInputPath,
+  resolveGroupFolderPath,
+  resolveGroupIpcPath,
+} from './group-folder.js';
 import { logger } from './logger.js';
 import {
   CONTAINER_HOST_GATEWAY,
@@ -604,6 +608,20 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
+
+  // Give this container its own inbox, mounted over the group's shared
+  // /workspace/ipc/input. See resolveContainerInputPath for why a shared one
+  // lets two containers steal each other's _close sentinel.
+  const inputDir = resolveContainerInputPath(group.folder, containerName);
+  fs.mkdirSync(inputDir, { recursive: true });
+  if (!input.isMain && process.getuid?.() === 0) {
+    fs.chmodSync(inputDir, 0o777);
+  }
+  mounts.push({
+    hostPath: inputDir,
+    containerPath: '/workspace/ipc/input',
+    readonly: false,
+  });
   // Main group uses the default OneCLI agent; others use their own agent.
   const agentIdentifier = input.isMain
     ? undefined
@@ -756,7 +774,13 @@ export async function runContainerAgent(
         'Container timeout, stopping gracefully',
       );
       try {
-        stopContainer(containerName);
+        // stopContainer only builds the command string. It has to be run:
+        // before this, the timeout called it and discarded the result, so a
+        // container that went quiet was never stopped at all.
+        execSync(stopContainer(containerName), {
+          stdio: 'pipe',
+          timeout: 30_000,
+        });
       } catch (err) {
         logger.warn(
           { group: group.name, containerName, err },
@@ -776,6 +800,8 @@ export async function runContainerAgent(
 
     container.on('close', (code) => {
       clearTimeout(timeout);
+      // One inbox per container would otherwise pile up forever.
+      fs.rmSync(inputDir, { recursive: true, force: true });
       const duration = Date.now() - startTime;
 
       if (timedOut) {

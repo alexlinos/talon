@@ -42,3 +42,21 @@ export function resolveGroupIpcPath(folder: string): string {
   ensureWithinBase(ipcBaseDir, ipcPath);
   return ipcPath;
 }
+
+/**
+ * IPC inbox for one container, mounted at /workspace/ipc/input.
+ *
+ * It has to be per container, not per group. Two containers can run for the
+ * same group folder at once, because the queue keys by chat JID and one
+ * folder can have several (the copilot group is reached via both
+ * `http:copilot` and `webhook:copilot`). The agent-runner deletes inbox files
+ * as it reads them, so with a shared inbox either container could consume the
+ * other's follow-up messages or its `_close` sentinel. The container that
+ * lost its `_close` then never exits.
+ */
+export function resolveContainerInputPath(
+  folder: string,
+  containerName: string,
+): string {
+  return path.join(resolveGroupIpcPath(folder), `input-${containerName}`);
+}

@@ -2,7 +2,8 @@ import { ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
+import { MAX_CONCURRENT_CONTAINERS } from './config.js';
+import { resolveContainerInputPath } from './group-folder.js';
 import { logger } from './logger.js';
 
 interface QueuedTask {
@@ -159,11 +160,19 @@ export class GroupQueue {
    */
   sendMessage(groupJid: string, text: string): boolean {
     const state = this.getGroup(groupJid);
-    if (!state.active || !state.groupFolder || state.isTaskContainer)
+    if (
+      !state.active ||
+      !state.groupFolder ||
+      !state.containerName ||
+      state.isTaskContainer
+    )
       return false;
     state.idleWaiting = false; // Agent is about to receive work, no longer idle
 
-    const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
+    const inputDir = resolveContainerInputPath(
+      state.groupFolder,
+      state.containerName,
+    );
     try {
       fs.mkdirSync(inputDir, { recursive: true });
       const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
@@ -182,9 +191,12 @@ export class GroupQueue {
    */
   closeStdin(groupJid: string): void {
     const state = this.getGroup(groupJid);
-    if (!state.active || !state.groupFolder) return;
+    if (!state.active || !state.groupFolder || !state.containerName) return;
 
-    const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
+    const inputDir = resolveContainerInputPath(
+      state.groupFolder,
+      state.containerName,
+    );
     try {
       fs.mkdirSync(inputDir, { recursive: true });
       fs.writeFileSync(path.join(inputDir, '_close'), '');
