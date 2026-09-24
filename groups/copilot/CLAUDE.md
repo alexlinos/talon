@@ -496,16 +496,51 @@ Deliver the report via `send_message` with these sections:
 
 ---
 
-#### 6d — Fan out per-customer notifications (best-effort)
+#### 6d — Dispatch the verdict to the customer's notification routes (always do this)
 
-After step 6c's analyst delivery, optionally fan the report out to the
-customer's configured Slack/email/Teams/etc. destinations via CoPilot's
-notification engine. **One MCP tool call** —
-`mcp__copilot__DispatchNotificationsTool` — with the report fields.
-CoPilot does the route lookup, formatting, delivery (SMTP direct or
-Shuffle for everything else), and idempotency. **Do not** fail the
-investigation if dispatch errors. Full instructions: `notifications.md`
-(in this group's directory).
+After step 6b's `SubmitAiAnalystReportTool` returns successfully, call
+`mcp__copilot__DispatchNotificationsTool` exactly once per investigation.
+CoPilot owns the routing — it looks up the customer's
+`customer_notification_route` rows, filters by `trigger` + `min_severity`,
+and dispatches via SMTP or Shuffle using credentials stored in CoPilot's
+connectors and `customer_shuffle_integration` tables. **Talon never sees
+the Shuffle / SMTP keys** — this is the only safe path for sending the
+verdict to anyone outside CoPilot.
+
+This step is **always required** — do not skip it as "best-effort optional"
+the way earlier versions of this file framed it. The agent has historically
+under-called this tool; that's the bug you are fixing by running it every
+time.
+
+Pick the `trigger` based on `severity_assessment`:
+
+- `Critical` or `High` → `"severity_critical_or_high"`
+- anything else (`Medium`, `Low`, `Informational`) → `"investigation_complete"`
+
+Routes filter on `min_severity` independently, so passing
+`"investigation_complete"` for a Low-severity finding is correct — the
+route decides whether to actually fire.
+
+Arguments:
+
+| Field | Required | Source |
+|---|---|---|
+| `customer_code` | yes | the alert's `customer_code` |
+| `alert_id` | yes | the integer alert ID |
+| `trigger` | yes | `"severity_critical_or_high"` or `"investigation_complete"` (see above) |
+| `severity_assessment` | yes | the exact value you wrote to `ai_analyst_report.severity_assessment` |
+| `summary` | yes | the exact value you wrote to `ai_analyst_report.summary` |
+| `alert_name` | recommended | the original alert title — helps the route's format template render context |
+| `report_url` | optional | deep link back to the report in CoPilot if you have one |
+
+Treat the response as best-effort delivery: a non-2xx response or an
+error field is logged-and-moved-on, **not** a reason to mark the
+investigation failed (the report itself already landed in step 6b).
+Successful responses return per-route outcomes including `dispatched`,
+`skipped` (idempotency hits), and `failed` counts, plus any
+`shuffle_execution_id`s for forensic correlation.
+
+Full operator-side reference: `notifications.md` in this group's directory.
 
 ---
 
