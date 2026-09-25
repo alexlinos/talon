@@ -223,6 +223,8 @@ identical to "nothing happened" — so check this before hunting.
   c. Report any agent last seen more than 24 hours ago. Call out
      crown-jewel or server assets first — check MemPalace room "assets" for
      the customer if you need to know which those are.
+  d. Before reporting a silent agent, search MemPalace room "assets" for its
+     hostname. If it is recorded as replaced or decommissioned, leave it out.
 
 STEP 3 — HUNTS
 For each (customer, source), run these with timeframe="last_24h" and limit=25.
@@ -294,6 +296,10 @@ with a small limit.
 
 STEP 4 — TRIAGE
 Most hits will be benign. Before reporting anything, rule out the obvious:
+  - Never infer a host's role from its name. Naming schemes are local, and a
+    "DC" in a hostname may not mean domain controller. State a role (server,
+    domain controller, a person's workstation) only when MemPalace room
+    "assets" or the agent's own data (OS, agent groups) says so.
   - Is this a known-good admin pattern for the environment? Check MemPalace
     (mempalace_search, wing=<customer_code>, room="environment") and
     room="false_positives" before calling anything suspicious.
