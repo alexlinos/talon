@@ -1,12 +1,11 @@
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
-import { Channel, RegisteredGroup } from '../types.js';
+import { Channel } from '../types.js';
 
 // JID used by the webhook channel — tasks that want their output POSTed
 // to the webhook should use this as their chat_jid.
 export const WEBHOOK_JID = 'webhook:copilot';
-const WEBHOOK_GROUP_FOLDER = 'copilot';
 
 export class WebhookChannel implements Channel {
   name = 'webhook';
@@ -29,14 +28,10 @@ export class WebhookChannel implements Channel {
       return;
     }
 
-    const group: RegisteredGroup = {
-      name: 'CoPilot Webhook',
-      folder: WEBHOOK_GROUP_FOLDER,
-      trigger: '',
-      added_at: new Date().toISOString(),
-      requiresTrigger: false,
-    };
-    this.opts.registerGroup?.(WEBHOOK_JID, group);
+    // No registerGroup here. The http channel registers the copilot group,
+    // with its MCP mounts, under this JID too. A second, mount-less
+    // registration for the same folder could win the scheduler's
+    // find-by-folder lookup and start task containers without /workspace/extra.
 
     this.opts.onChatMetadata(
       WEBHOOK_JID,

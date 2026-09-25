@@ -453,6 +453,9 @@ entire final reply <internal>done</internal>, or the report arrives twice.`,
       },
     };
     this.opts.registerGroup?.(COPILOT_JID, group);
+    // Scheduled tasks run as WEBHOOK_JID. Same group object, so they get the
+    // same mounts.
+    this.opts.registerGroup?.(WEBHOOK_JID, group);
     this.seedAlertDigestTask();
     this.seedThreatHuntTask();
 

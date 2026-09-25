@@ -40,4 +40,19 @@ describe('WebhookChannel', () => {
     expect(body.severity).toBe('Report');
     expect(body.text).toContain('Scope: tnh');
   });
+
+  it('does not register its own copy of the copilot group', async () => {
+    // A mount-less registration for the same folder could win the
+    // scheduler's find-by-folder lookup, so task containers would start
+    // without /workspace/extra. The http channel registers this JID instead.
+    const registerGroup = vi.fn();
+    const channel = new WebhookChannel({
+      registerGroup,
+      onChatMetadata: vi.fn(),
+    } as any);
+    await channel.connect();
+
+    expect(registerGroup).not.toHaveBeenCalled();
+    expect(channel.isConnected()).toBe(true);
+  });
 });
