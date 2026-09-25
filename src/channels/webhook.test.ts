@@ -24,7 +24,7 @@ describe('WebhookChannel', () => {
     const channel = new WebhookChannel({} as any);
     await channel.sendMessage(
       'webhook:copilot',
-      '\nDaily Threat Hunt — 2026-09-25\nScope: tnh',
+      '\nDaily Threat Hunt — 2026-09-25\nScope: acme',
     );
 
     const [url, init] = fetchMock.mock.calls[0] as unknown as [
@@ -38,7 +38,7 @@ describe('WebhookChannel', () => {
     expect(headers['X-Relay-Token']).toBe('relay-token');
     expect(body.alert_name).toBe('Daily Threat Hunt — 2026-09-25');
     expect(body.severity).toBe('Report');
-    expect(body.text).toContain('Scope: tnh');
+    expect(body.text).toContain('Scope: acme');
   });
 
   it('does not register its own copy of the copilot group', async () => {
