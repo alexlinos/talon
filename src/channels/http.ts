@@ -2,7 +2,12 @@ import fs from 'fs';
 import http from 'http';
 import path from 'path';
 
-import { createTask, getTaskById, getTasksForGroup } from '../db.js';
+import {
+  createTask,
+  getTaskById,
+  getTasksForGroup,
+  updateTask,
+} from '../db.js';
 import { logger } from '../logger.js';
 import {
   addLesson,
@@ -54,7 +59,6 @@ export class HttpChannel implements Channel {
 
   private seedAlertDigestTask(): void {
     const TASK_ID = 'copilot-alert-digest-15m';
-    if (getTaskById(TASK_ID)) return;
 
     const task = {
       id: TASK_ID,
@@ -81,7 +85,8 @@ export class HttpChannel implements Channel {
      AND ast.index_id != ''
    ORDER BY a.alert_creation_time DESC;
 
-2. If no rows are returned, stop here. Do not send any message.
+2. If no rows are returned, stop here. Do not send any message, and make your
+   entire final reply <internal>no open alerts</internal>.
 
 3. For each alert:
 
@@ -143,19 +148,29 @@ export class HttpChannel implements Channel {
          ioc_type: ip|domain|hash|process|url|user|command
          vt_verdict: malicious|suspicious|clean|unknown
 
-   h. SEND REPORT via send_message:
-      🔍 **SOC Investigation** — <alert_name>
-      Customer: <customer_code> | Asset: <asset_name> | Created: <alert_creation_time>
-      **Severity**: <assessment> | **Template**: <alert_type or "default">
+   h. DO NOT SEND THE REPORT YOURSELF. CoPilot emails the verdict on its own
+      when SubmitAiAnalystReportTool saves the report, through the notification
+      relay. Anything you send with send_message goes out through that same
+      relay as a second email.
 
-      **Alert Summary**: rule description, MITRE tactic/technique
-      **IOC Analysis**: table of IOCs with type and VT verdict
-      **Severity Assessment**: reasoning
-      **Recommended Actions**: specific actionable steps
+   FINAL REPLY: your final reply is forwarded to that relay too, so wrap all of
+   it in <internal>...</internal>.
 
       On any error during write-back, call UpdateAiAnalystJobTool with
       status="failed" and error_message=<exception details>.`,
     };
+
+    const existing = getTaskById(TASK_ID);
+    if (existing) {
+      // Keep the prompt in step with the code: without this, a prompt change
+      // never reaches a task that was seeded earlier. Status and schedule are
+      // left as the operator set them.
+      if (existing.prompt !== task.prompt) {
+        updateTask(TASK_ID, { prompt: task.prompt });
+        logger.info({ taskId: TASK_ID }, 'Updated scheduled task prompt');
+      }
+      return;
+    }
 
     const fullTask = { ...task, last_run: null, last_result: null };
     fullTask.next_run = computeNextRun(fullTask);
@@ -168,7 +183,6 @@ export class HttpChannel implements Channel {
 
   private seedThreatHuntTask(): void {
     const TASK_ID = 'copilot-threat-hunt-daily';
-    if (getTaskById(TASK_ID)) return;
 
     // Seeded paused. This sweeps every customer and fans out a dozen searches
     // per source, so it should not start firing on its own the moment someone
@@ -302,8 +316,10 @@ Enrich genuinely suspicious IOCs with mcp__cve__* (virustotal_lookup,
 lookup_ip_reputation, check_ip_noise) before escalating.
 
 STEP 5 — REPORT
-If nothing survived triage AND no agent gaps were found, send exactly one short
-line saying the hunt ran clean, with the customers and sources covered. Do not
+Reports are emailed: send_message goes out through the webhook relay.
+
+If nothing survived triage AND no agent gaps were found, send_message exactly one
+short line saying the hunt ran clean, with the customers and sources covered. Do not
 pad it. A daily no-op that shouts gets ignored, and then the one real finding
 gets ignored too.
 
@@ -336,8 +352,24 @@ the hunt over it.
 ERROR HANDLING
 If one customer, source, or hunt query fails, carry on with the rest and list
 what failed at the end of the report. A partial hunt is useful; a hunt that
-aborts on the first error is not.`,
+aborts on the first error is not.
+
+FINAL REPLY
+Your final reply is also forwarded to the webhook. After send_message, make your
+entire final reply <internal>done</internal>, or the report arrives twice.`,
     };
+
+    const existing = getTaskById(TASK_ID);
+    if (existing) {
+      // Keep the prompt in step with the code: without this, a prompt change
+      // never reaches a task that was seeded earlier. Status and schedule are
+      // left as the operator set them.
+      if (existing.prompt !== task.prompt) {
+        updateTask(TASK_ID, { prompt: task.prompt });
+        logger.info({ taskId: TASK_ID }, 'Updated scheduled task prompt');
+      }
+      return;
+    }
 
     const fullTask = { ...task, last_run: null, last_result: null };
     fullTask.next_run = computeNextRun(fullTask);
