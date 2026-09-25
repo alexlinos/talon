@@ -63,10 +63,19 @@ export class WebhookChannel implements Channel {
     };
     if (this.secret) {
       headers['Authorization'] = `Bearer ${this.secret}`;
+      // copilot-mailrelay (the webhook -> email relay on the SOC host)
+      // authenticates with this header instead of Authorization.
+      headers['X-Relay-Token'] = this.secret;
     }
 
+    // The relay builds the email subject from alert_name and severity. Reports
+    // open with a title line (e.g. "Daily Threat Hunt — <date>"), so use it.
+    const title =
+      text.split('\n').find((line) => line.trim()) ?? 'Talon report';
     const body = JSON.stringify({
       text,
+      alert_name: title.trim().slice(0, 150),
+      severity: 'Report',
       timestamp: new Date().toISOString(),
     });
 
